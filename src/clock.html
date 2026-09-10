@@ -7,7 +7,7 @@
           {{#each analogTicks}}
             <line
               class="tick"
-              data-analog-tick="true"
+              data-analog-tick="{{ this }}"
               data-active="{{ showSeconds() ? getAnalogTickDistance(this) : '' }}"
               x1="0"
               y1="-38"

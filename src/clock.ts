@@ -1,57 +1,46 @@
-import { Signal, type WidgetContext, type WidgetPayload, signal } from '@displayduck/base';
+import { Signal, Widget, type WidgetConfigValues, signal } from '@displayduck/base';
 
 type ClockStyle = 'flip' | 'digital' | 'analog';
 type ClockTime = { h: string; m: string; s: string };
 type FlipDigitState = { current: string; next: string; flipping: boolean };
 
-export class DisplayDuckWidget {
+type ClockConfig = WidgetConfigValues & {
+  styles?: string;
+  showSeconds?: boolean;
+  ledFont?: boolean;
+  blinkSeparator?: boolean;
+  showAllNumbers?: boolean;
+  use24Hour?: boolean;
+  shadow?: boolean;
+};
+
+export class DisplayDuckWidget extends Widget<ClockConfig> {
   private static readonly FLIP_DURATION_MS = 180;
   private static readonly ANALOG_REFRESH_MS = 50;
 
   private clockTimerId: ReturnType<typeof setTimeout> | null = null;
   private flipTimeouts = new Map<number, ReturnType<typeof setTimeout>>();
-  private config: Record<string, unknown>;
-  private widgetName = '';
   private analogMarkerRotation = 0;
   private flipDigits: FlipDigitState[] = [];
-
-  private digitalHourEl: HTMLElement | null = null;
-  private digitalMinuteEl: HTMLElement | null = null;
-  private digitalSecondEl: HTMLElement | null = null;
-  private analogHourEl: SVGLineElement | null = null;
-  private analogMinuteEl: SVGLineElement | null = null;
-  private analogMarkerEl: SVGGElement | null = null;
-  private analogTickEls: SVGLineElement[] = [];
-  private flipDigitEls: HTMLElement[] = [];
+  private previousTickActive: string[] = new Array(60).fill('');
 
   public readonly analogQuarterDigits = [3, 6, 9, 12];
   public readonly analogAllDigits = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
   public readonly analogTicks = Array.from({ length: 60 }, (_, index) => index);
   public readonly shadows: Signal<boolean> = signal(false);
 
-  public constructor(private readonly ctx: WidgetContext) {
-    this.config = this.extractConfig(ctx.payload);
-    this.widgetName = this.extractWidgetName(ctx.payload);
-    const now = this.getCurrentTime();
-    this.flipDigits = this.createFlipDigits(now);
-  }
-
   public onInit(): void {
-    this.cacheDomRefs();
+    this.shadows.set(this.config.shadow === true);
+    this.flipDigits = this.createFlipDigits(this.getCurrentTime());
     this.applyTimeToDom(this.getCurrentTime(), true);
     this.scheduleNextTick();
   }
 
-  public onUpdate(payload: WidgetPayload): void {
-    this.config = this.extractConfig(payload);
-    this.widgetName = this.extractWidgetName(payload);
-
-    setTimeout(() => {
-      this.cacheDomRefs();
-      this.flipDigits = this.createFlipDigits(this.getCurrentTime());
-      this.applyTimeToDom(this.getCurrentTime(), true);
-      this.scheduleNextTick();
-    }, 0);
+  public onUpdate(): void {
+    this.shadows.set(this.config.shadow === true);
+    this.flipDigits = this.createFlipDigits(this.getCurrentTime());
+    this.applyTimeToDom(this.getCurrentTime(), true);
+    this.scheduleNextTick();
   }
 
   public onDestroy(): void {
@@ -79,7 +68,7 @@ export class DisplayDuckWidget {
     if (raw === 'flip' || raw === 'digital' || raw === 'analog') {
       return raw;
     }
-    const name = this.widgetName.toLowerCase();
+    const name = String(this.payload['name'] ?? '').toLowerCase();
     if (name.includes('flip')) return 'flip';
     if (name.includes('analog')) return 'analog';
     if (name.includes('digital')) return 'digital';
@@ -124,17 +113,6 @@ export class DisplayDuckWidget {
 
   public thirdFlipPair(): number[] {
     return [4, 5];
-  }
-
-  private cacheDomRefs(): void {
-    this.digitalHourEl = this.ctx.mount.querySelector('[data-clock-hour]');
-    this.digitalMinuteEl = this.ctx.mount.querySelector('[data-clock-minute]');
-    this.digitalSecondEl = this.ctx.mount.querySelector('[data-clock-second]');
-    this.analogHourEl = this.ctx.mount.querySelector('[data-analog-hour]');
-    this.analogMinuteEl = this.ctx.mount.querySelector('[data-analog-minute]');
-    this.analogMarkerEl = this.ctx.mount.querySelector('[data-analog-marker]');
-    this.analogTickEls = Array.from(this.ctx.mount.querySelectorAll('[data-analog-tick]'));
-    this.flipDigitEls = Array.from(this.ctx.mount.querySelectorAll<HTMLElement>('[data-flip-index]'));
   }
 
   private scheduleNextTick(): void {
@@ -186,45 +164,53 @@ export class DisplayDuckWidget {
   }
 
   private applyDigital(time: ClockTime): void {
-    if (!this.digitalHourEl || !this.digitalMinuteEl) return;
-    this.digitalHourEl.textContent = time.h;
-    this.digitalMinuteEl.textContent = time.m;
-    if (this.digitalSecondEl) {
-      this.digitalSecondEl.textContent = time.s;
+    if (!this.isDigital()) return;
+    this.dom.query('[data-clock-hour]').setText(time.h);
+    this.dom.query('[data-clock-minute]').setText(time.m);
+    if (this.showSeconds()) {
+      this.dom.query('[data-clock-second]').setText(time.s);
     }
   }
 
   private applyAnalog(time: ClockTime): void {
-    if (!this.analogHourEl || !this.analogMinuteEl) return;
+    if (!this.isAnalog()) return;
 
     const hourRotation = this.getAnalogHourRotation(time);
     const minuteRotation = this.getAnalogMinuteRotation(time);
-    this.analogHourEl.setAttribute('transform', `rotate(${hourRotation})`);
-    this.analogMinuteEl.setAttribute('transform', `rotate(${minuteRotation})`);
-
-    if (this.analogMarkerEl) {
-      this.analogMarkerEl.setAttribute('transform', `rotate(${this.analogMarkerRotation - 3} 0 0)`);
-    }
+    this.dom.query('[data-analog-hour]').setAttribute('transform', `rotate(${hourRotation})`);
+    this.dom.query('[data-analog-minute]').setAttribute('transform', `rotate(${minuteRotation})`);
 
     if (this.showSeconds()) {
-      for (let index = 0; index < this.analogTickEls.length; index += 1) {
-        const tickEl = this.analogTickEls[index];
-        const distance = this.getAnalogTickDistance(index);
-        tickEl.setAttribute('data-active', distance >= 0 ? String(distance) : '');
+      this.dom.query('[data-analog-marker]').setAttribute(
+        'transform',
+        `rotate(${this.analogMarkerRotation - 3} 0 0)`,
+      );
+    }
+
+    // Only write ticks whose active state actually changed -- most of the
+    // 60 ticks stay far from the marker at any given moment, and this runs
+    // every 50ms; writing all 60 unconditionally would be a lot of
+    // unnecessary postMessage traffic for a mostly-unchanged ring.
+    for (let index = 0; index < this.analogTicks.length; index += 1) {
+      const nextValue = this.showSeconds()
+        ? (() => {
+          const distance = this.getAnalogTickDistance(index);
+          return distance >= 0 ? String(distance) : '';
+        })()
+        : '';
+      if (this.previousTickActive[index] === nextValue) {
+        continue;
       }
-    } else {
-      for (const tickEl of this.analogTickEls) {
-        tickEl.setAttribute('data-active', '');
-      }
+      this.previousTickActive[index] = nextValue;
+      this.dom.query(`[data-analog-tick="${index}"]`).setAttribute('data-active', nextValue);
     }
   }
 
   private applyFlip(time: ClockTime, forceInstant: boolean): void {
-    if (!this.flipDigitEls.length) return;
+    if (!this.isFlip()) return;
     const nextDigits = `${time.h}${time.m}${time.s}`.split('');
 
-    for (let index = 0; index < this.flipDigitEls.length; index += 1) {
-      const digitEl = this.flipDigitEls[index];
+    for (let index = 0; index < nextDigits.length; index += 1) {
       const current = this.flipDigits[index] ?? { current: '0', next: '0', flipping: false };
       const next = nextDigits[index] ?? '0';
 
@@ -239,14 +225,14 @@ export class DisplayDuckWidget {
         current.next = next;
         current.flipping = false;
         this.flipDigits[index] = current;
-        this.renderFlipDigit(index, digitEl);
+        this.renderFlipDigit(index);
         continue;
       }
 
       current.next = next;
       current.flipping = true;
       this.flipDigits[index] = current;
-      this.renderFlipDigit(index, digitEl);
+      this.renderFlipDigit(index);
 
       const timeout = setTimeout(() => {
         const state = this.flipDigits[index];
@@ -254,7 +240,7 @@ export class DisplayDuckWidget {
         state.current = state.next;
         state.flipping = false;
         this.flipDigits[index] = state;
-        this.renderFlipDigit(index, digitEl);
+        this.renderFlipDigit(index);
         this.flipTimeouts.delete(index);
       }, DisplayDuckWidget.FLIP_DURATION_MS);
 
@@ -262,23 +248,17 @@ export class DisplayDuckWidget {
     }
   }
 
-  private renderFlipDigit(index: number, digitEl: HTMLElement): void {
+  private renderFlipDigit(index: number): void {
     const state = this.flipDigits[index];
     if (!state) return;
 
-    digitEl.classList.toggle('flipping', state.flipping);
-
-    const full = digitEl.querySelector<HTMLElement>('.digit-full');
-    const staticTop = digitEl.querySelector<HTMLElement>('.digit-static.top .value');
-    const staticBottom = digitEl.querySelector<HTMLElement>('.digit-static.bottom .value');
-    const flipTop = digitEl.querySelector<HTMLElement>('.digit-flip.top .value');
-    const flipBottom = digitEl.querySelector<HTMLElement>('.digit-flip.bottom .value');
-
-    if (full) full.textContent = state.current;
-    if (staticTop) staticTop.textContent = state.flipping ? state.next : state.current;
-    if (staticBottom) staticBottom.textContent = state.current;
-    if (flipTop) flipTop.textContent = state.current;
-    if (flipBottom) flipBottom.textContent = state.next;
+    const digitSelector = `[data-flip-index="${index}"]`;
+    this.dom.query(digitSelector).toggleClass('flipping', state.flipping);
+    this.dom.query(`${digitSelector} .digit-full`).setText(state.current);
+    this.dom.query(`${digitSelector} .digit-static.top .value`).setText(state.flipping ? state.next : state.current);
+    this.dom.query(`${digitSelector} .digit-static.bottom .value`).setText(state.current);
+    this.dom.query(`${digitSelector} .digit-flip.top .value`).setText(state.current);
+    this.dom.query(`${digitSelector} .digit-flip.bottom .value`).setText(state.next);
   }
 
   private getAnalogHourRotation(time: ClockTime): number {
@@ -323,19 +303,5 @@ export class DisplayDuckWidget {
       next: digit,
       flipping: false,
     }));
-  }
-
-  private extractConfig(payload: WidgetPayload): Record<string, unknown> {
-    const raw = (payload as { config?: unknown })?.config;
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
-
-    // @ts-ignore
-    if(raw.hasOwnProperty('shadow')) this.shadows.set(Boolean(raw.shadow));
-    return raw as Record<string, unknown>;
-  }
-
-  private extractWidgetName(payload: WidgetPayload): string {
-    const name = (payload as { name?: unknown })?.name;
-    return typeof name === 'string' ? name : '';
   }
 }
